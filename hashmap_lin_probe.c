@@ -6,16 +6,22 @@
 #define LOAD_FACTOR 1.5		/* Reciprocal of actual load factor. */
 #define HASHMAP_INIT_SIZE (10)	/* Default size of a hashmap. */
 
+typedef enum entry_state {
+    EMPTY = 0,
+    DELETED,
+    ACTIVE
+} entry_state_t;
+
 struct hm_entry_t {
-    struct hm_entry_t *next;
     void *key;
     void *value;
+    entry_state_t state;
 };
 
 struct hashmap {
     size_t size;                        /* Size of backing array. */
     size_t nentries;                    /* Number of entries in backing array. */
-    struct hm_entry_t **backing;	/* The backing array of pointers to entries. */
+    struct hm_entry_t *backing; 	/* The backing array of pointers to entries. */
     int (*hashcode)(void*);		/* Hash function. */
     int (*equals)(void*, void*);        /* Equals function. */
 };
@@ -24,7 +30,7 @@ struct hashmap {
 /* === PRIVATE FUNCTIONS === */
 
 /*
- * Compressed a hash value to fit the table. Inline for efficiency.
+ * Compresses a hash value to fit the table. Inline for efficiency.
  */
 static inline int compress(struct hashmap *hm, int hash)
 {
@@ -34,7 +40,7 @@ static inline int compress(struct hashmap *hm, int hash)
 /*
  * Simple reference equality.
  */
-static int ref_eq(void *a, void *b)
+static inline int ref_eq(void *a, void *b)
 {
     return a == b;
 }
@@ -42,27 +48,47 @@ static int ref_eq(void *a, void *b)
 /*
  * Use address as hash. This is a bad hash.
  */
-static int addr_hash(void *key)
+static inline int addr_hash(void *key)
 {
     return (int)((unsigned long) key);
 }
 
+
+static inline int update_index(struct hashmap *hm, int index)
+{
+    return (index + 1) % hm->size;
+}
 
 /*
  * Adds a hm_entry_t to the hashmap.
  * Verifies that entry != NULL.
  * Does not increment the count of entries.
  */
-static void add_entry(struct hashmap *self, struct hm_entry_t *entry)
+static int add_entry(struct hashmap *self, struct hm_entry_t *entry)
 {
-    if (!entry) {
-	return;
+    int index = compress(self, self->hashcode(entry->key));
+    int index_cycle_flag = index;
+    struct hm_entry_t cur = self->backing[index];
+
+    while (cur.state == ACTIVE) {
+	// Moving this inside the while-loop allows for no post
+	// loop condition checking, improving performance by ~5%.
+	if (self->equals(cur.key, entry->key)) {
+	    return 0;
+	}
+
+	index = update_index(self, index);
+	cur = self->backing[index];
+
+	if (index == index_cycle_flag) {
+	    return 0;
+	}
     }
 
-    int index = compress(self, self->hashcode(entry->key));
-    // Add at head of linked list.
-    entry->next = self->backing[index];
-    self->backing[index] = entry;
+    self->backing[index] = *entry;
+    cur.state = ACTIVE;
+
+    return 1;
 }
 
 /*
@@ -70,14 +96,14 @@ static void add_entry(struct hashmap *self, struct hm_entry_t *entry)
  */
 static int resize(struct hashmap *self, size_t new_size)
 {
-    struct hm_entry_t **resized = calloc(new_size, sizeof(*resized));
+    struct hm_entry_t *resized = calloc(new_size, sizeof(*resized));
     if (!resized) {
 	// Set error code.
 	return 0;
     }
 
     // Rehash all entries in the backing array.
-    struct hm_entry_t **old = self->backing;
+    struct hm_entry_t *old = self->backing;
     size_t old_size = self->size;
 
     self->size = new_size;
@@ -86,12 +112,9 @@ static int resize(struct hashmap *self, size_t new_size)
     // Rehash each bucket.
     size_t i;
     for (i = 0; i < old_size; ++i) {
-	struct hm_entry_t *cur = old[i];
-	// Rehash each item in the current bucket.
-	while (cur) {
-	    struct hm_entry_t *next = cur->next;
-	    add_entry(self, cur);
-	    cur = next;
+	struct hm_entry_t cur = old[i];
+	if (cur.state == ACTIVE) {
+	    add_entry(self, &cur);
 	}
     }
 
@@ -102,19 +125,36 @@ static int resize(struct hashmap *self, size_t new_size)
 /*
  * Frees all entries in the backing array, then frees the backing array.
  */
-static void del_backing(struct hashmap *self)
+static inline void del_backing(struct hashmap *self)
 {
-    size_t i;
-    for (i = 0; i < self->size; ++i) {
-	struct hm_entry_t *cur = self->backing[i];
-	while (cur) {
-	    struct hm_entry_t *next = cur->next;
-	    free(cur);
-	    cur = next;
+    free(self->backing);
+}
+
+/*
+ * Finds and returns the matching entry.
+ * Returns NULL if no matches.
+ */
+static struct hm_entry_t *find_entry(struct hashmap *self, void *key)
+{
+    int i = compress(self, self->hashcode(key));
+    int index_cycle_flag = i;
+    struct hm_entry_t cur = self->backing[i];
+
+    // Should stop when: finds empty, or find active && matching
+    while (cur.state != ACTIVE || !self->equals(cur.key, key)) {
+	if (cur.state == EMPTY) {
+	    return NULL;
+	}
+
+	i = update_index(self, i);
+	cur = self->backing[i];
+
+	if (i == index_cycle_flag) {
+	    return NULL;
 	}
     }
 
-    free(self->backing);
+    return &self->backing[i];
 }
 
 /* === PUBLIC FUNCTIONS === */
@@ -125,7 +165,7 @@ struct hashmap *hashmap_init(
     int(*equals_func)(void*, void*)
     )
 {
-    struct hm_entry_t **arr = calloc(HASHMAP_INIT_SIZE, sizeof(*arr));
+    struct hm_entry_t *arr = calloc(HASHMAP_INIT_SIZE, sizeof(*arr));
     if (!arr) {
 	// Set error code
 	return NULL;
@@ -165,11 +205,6 @@ void hashmap_del(struct hashmap *self)
 
 int hashmap_add(struct hashmap *self, void *key, void *value)
 {
-    if (!self) {
-	// Set error code.
-	return 0;
-    }
-
     // Resize and rehash.
     if ((self->nentries * LOAD_FACTOR) >= self->size) {
 	if (!resize(self, self->size * 2)) {
@@ -178,29 +213,15 @@ int hashmap_add(struct hashmap *self, void *key, void *value)
 	}
     }
 
-    int index = compress(self, self->hashcode(key));
+    struct hm_entry_t pair;
+    pair.key = key;
+    pair.value = value;
+    pair.state = ACTIVE;
 
-    // Need to ensure uniqueness before adding.
-    struct hm_entry_t *cur = self->backing[index];
-    while (cur && !self->equals(cur->key, key)) {
-	cur = cur->next;
-    }
-
-    // Indicates there is a duplicate entry.
-    if (cur) {
-	return 0;
-    }
-
-    struct hm_entry_t *pair = malloc(sizeof(*pair));
-    if (!pair) {
+    if (!add_entry(self, &pair)) {
 	// Set error code.
 	return 0;
     }
-
-    pair->key = key;
-    pair->value = value;
-
-    add_entry(self, pair);
 
     ++self->nentries;
 
@@ -209,32 +230,16 @@ int hashmap_add(struct hashmap *self, void *key, void *value)
 
 void *hashmap_remove(struct hashmap *self, void *key)
 {
-    if (!self) {
-	// Set error code.
+    struct hm_entry_t *cur = find_entry(self, key);
+
+    if (!cur || !cur->state) {
 	return NULL;
     }
 
-    int index = compress(self, self->hashcode(key));
-
-    struct hm_entry_t **cur = &(self->backing[index]);
-
-    while (*cur && !self->equals((*cur)->key, key)) {
-	cur = &((*cur)->next);
-    }
-
-    // Item not in list. Return NULL and set error code.
-    if (!*cur) {
-	// Set error code.
-	return NULL;
-    }
-
-    // Remove item from the list.
-    struct hm_entry_t *removed = *cur;
-    void *retval = removed->value;
-
-    *cur = (*cur)->next;
+    void *retval = cur->value;
+    // Set flag to deleted.
+    cur->state = DELETED;
     --self->nentries;
-    free(removed);
 
     // Consider rehashing if size:nentries ratio falls below a certain point.
 
@@ -243,14 +248,8 @@ void *hashmap_remove(struct hashmap *self, void *key)
 
 void *hashmap_get(struct hashmap *self, void *key)
 {
-    int i = compress(self, self->hashcode(key));
-    struct hm_entry_t *cur = self->backing[i];
-
-    while (cur && !self->equals(cur->key, key)) {
-	cur = cur->next;
-    }
-
-    return (cur) ? cur->value : NULL;
+    struct hm_entry_t *cur = find_entry(self, key);
+    return (cur && cur->state == ACTIVE) ? cur->value : NULL;
 }
 
 int hashmap_contains(struct hashmap *self, void *key)
@@ -269,10 +268,14 @@ size_t hashmap_size(struct hashmap *self)
     return self->nentries;
 }
 
-/* === Public Utilities === */
+/* === Public Utilities (not methods!) === */
 
 int hashmap_str_hash(void *key)
 {
+    if (!key) {
+	return 0;
+    }
+
     int hash = 0;
     int exp = 1;
     char *str = key;
@@ -289,6 +292,14 @@ int hashmap_str_hash(void *key)
 
 int hashmap_str_eq(void *str1, void *str2)
 {
+    if (str1 == str2) {
+	return 1;
+    }
+
+    if (!str1 || !str2) {
+	return 0;
+    }
+
     // strcmp returns 0 if the string are equal.
     return !strcmp(str1, str2);
 }

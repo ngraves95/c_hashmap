@@ -1,12 +1,17 @@
 # Makefile
 # C Hashmap project
-main=hashmap_tests.o
-src=hashmap.c hashmap_tests.c
-obj=hashmap.o hashmap_tests.o
+#obj=hashmap.o hashmap_tests.o
+obj=hashmap_lin_probe.o hashmap_tests.o
 inc=hashmap.h
 misc=Makefile
-target=hashmap
+target=hashmap_tests
 cflags=-Wall -g -O0 -Werror -pedantic -std=c99
+
+test: all
+	./$(target)
+
+valgrind: clean all
+	valgrind --show-leak-kinds=all --leak-check=full ./$(target)
 
 all: $(target)
 
@@ -18,6 +23,3 @@ $(target) : $(obj) $(misc)
 
 clean:
 	rm -f $(obj) *~
-
-test: $(all)
-	./$(main)
