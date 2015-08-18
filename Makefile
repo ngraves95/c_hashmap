@@ -1,7 +1,6 @@
 # Makefile
 # C Hashmap project
-#obj=hashmap.o hashmap_tests.o
-obj=hashmap_lin_probe.o hashmap_tests.o
+obj=hashmap.o hashmap_tests.o
 inc=hashmap.h
 misc=Makefile
 target=hashmap_tests
@@ -22,4 +21,4 @@ $(target) : $(obj) $(misc)
 	gcc $(cflags) -c -o $@ $<
 
 clean:
-	rm -f $(obj) *~
+	rm -f $(obj) *~ $(target)

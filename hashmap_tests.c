@@ -32,6 +32,23 @@
 #define assert_equal(a, b) __assert_eq((a), (b), __LINE__)
 #define assert_not_equal(a, b) __assert_neq((a), (b), __LINE__)
 
+#define delimiter() ","
+#define log_name() __log
+#define init_log(filename) FILE * log_name() = fopen(filename, "a");
+#define log(func_with_args)						\
+    do {								\
+	clock_t start = clock();					\
+	func_with_args;							\
+	clock_t stop = clock();						\
+	fprintf(log_name(), "%lu%s", stop - start, delimiter());	\
+    } while (0);
+
+#define close_log(filename)						\
+    do {								\
+        fprintf(log_name(), "-1\n");					\
+	fclose(log_name());						\
+    } while (0);
+
 /*
  * Tests adding 2 non-colliding keys, then tests colliding keys.
  */
@@ -191,27 +208,23 @@ void test_add_immediate_remove(struct hashmap *hm)
 
 int main(void)
 {
+    // Logging variables.
+    init_log("hashmap_performance.log");
+
     struct hashmap *hm = hashmap_new(NULL, NULL);
 
-    test_add_int(hm);
-    test_resize(hm);
-    test_add_str_with_good_hash_good_eq();
-    test_add_str_basic_hash_basic_eq();
-    test_collision();
-
-    // Time and log adding 1,000,000 elements.
-    clock_t start, stop;
-    FILE *log = fopen("hashmap_performance.log", "a");
+    log(test_add_int(hm));
+    log(test_resize(hm));
+    log(test_add_str_with_good_hash_good_eq());
+    log(test_add_str_basic_hash_basic_eq());
+    log(test_collision());
 
     int i;
     for (i = 0; i < 10; i++) {
-	start = clock();
-	test_add_immediate_remove(hm);
-	stop = clock();
-	fprintf(log, "%lu\n", (unsigned long) (stop - start));
+	log(test_add_immediate_remove(hm));
     }
 
-    fclose(log);
+    close_log();
 
     hashmap_del(hm);
     return 0;
